@@ -1,4 +1,5 @@
 import sqlite3
+import unicodedata
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
@@ -434,39 +435,65 @@ def list_chats(
             conn.close()
 
 
+def fold(text: Optional[str]) -> str:
+    """Lowercase and strip accents, so "tomas" matches "Tomás". Registered as a SQLite function."""
+    decomposed = unicodedata.normalize("NFD", text or "")
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).lower()
+
+
+def search_whatsmeow_contacts(search_pattern: str) -> dict:
+    """Map jid -> name for whatsmeow contacts whose name or number matches a LIKE pattern."""
+    try:
+        conn = sqlite3.connect(f"file:{WHATSAPP_DB_PATH}?mode=ro", uri=True)
+        conn.create_function("fold", 1, fold)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT their_jid, COALESCE(NULLIF(full_name, ''), NULLIF(push_name, ''), NULLIF(first_name, ''))
+            FROM whatsmeow_contacts
+            WHERE fold(full_name) LIKE fold(?) OR fold(push_name) LIKE fold(?)
+                OR fold(first_name) LIKE fold(?) OR fold(their_jid) LIKE fold(?)
+            LIMIT 50
+        """, (search_pattern,) * 4)
+        return {jid: name for jid, name in cursor.fetchall() if name}
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        return {}
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
 def search_contacts(query: str) -> List[Contact]:
     """Search contacts by name or phone number."""
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn.create_function("fold", 1, fold)
         cursor = conn.cursor()
-        
+
         # Split query into characters to support partial matching
         search_pattern = '%' +query + '%'
-        
+
         cursor.execute("""
-            SELECT DISTINCT 
+            SELECT DISTINCT
                 jid,
                 name
             FROM chats
-            WHERE 
-                (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
+            WHERE
+                (fold(name) LIKE fold(?) OR fold(jid) LIKE fold(?))
                 AND jid NOT LIKE '%@g.us'
             ORDER BY name, jid
             LIMIT 50
         """, (search_pattern, search_pattern))
         
-        contacts = cursor.fetchall()
-        
-        result = []
-        for contact_data in contacts:
-            contact = Contact(
-                phone_number=contact_data[0].split('@')[0],
-                name=contact_data[1],
-                jid=contact_data[0]
-            )
-            result.append(contact)
-            
-        return result
+        # jid -> name. The chats table often keeps the bare number as the name, so names from
+        # whatsmeow's contact store (address book, then the name they set) override it.
+        found = dict(cursor.fetchall())
+        found.update(search_whatsmeow_contacts(search_pattern))
+
+        return [
+            Contact(phone_number=jid.split('@')[0], name=name, jid=jid)
+            for jid, name in sorted(found.items(), key=lambda item: (item[1] or "", item[0]))
+        ][:50]
         
     except sqlite3.Error as e:
         print(f"Database error: {e}")

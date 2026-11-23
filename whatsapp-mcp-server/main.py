@@ -16,7 +16,18 @@ from whatsapp import (
 )
 
 # Initialize FastMCP server
-mcp = FastMCP("whatsapp")
+mcp = FastMCP(
+    "whatsapp",
+    instructions=(
+        "Reading (search_contacts, list_chats, list_messages, ...) uses the local SQLite stores and works "
+        "without the bridge. Sending (send_message, send_file, send_audio_message) goes through the Go "
+        "bridge's REST API on localhost:8080; if it fails with 'Connection refused' the bridge is not "
+        "running: start it with `cd whatsapp-bridge && go run main.go` and leave it running. The linked "
+        "session lives in whatsapp-bridge/store/, so no QR scan is needed again unless the device was "
+        "unlinked from the phone. Many chats are named by their bare number; search_contacts also matches "
+        "the address-book and push names, so look a person up by name there before asking for a number."
+    ),
+)
 
 @mcp.tool()
 def search_contacts(query: str) -> List[Dict[str, Any]]:
