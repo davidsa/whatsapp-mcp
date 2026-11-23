@@ -1087,8 +1087,18 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					if msg.Message.Key.FromMe != nil {
 						isFromMe = *msg.Message.Key.FromMe
 					}
-					if !isFromMe && msg.Message.Key.Participant != nil && *msg.Message.Key.Participant != "" {
-						sender = *msg.Message.Key.Participant
+					// Group history carries the author in Key.Participant or, when that is empty, in WebMessageInfo.Participant
+					participant := msg.Message.Key.GetParticipant()
+					if participant == "" {
+						participant = msg.Message.GetParticipant()
+					}
+					if !isFromMe && participant != "" {
+						// Live messages store only the user part, so do the same here
+						if participantJID, err := types.ParseJID(participant); err == nil {
+							sender = participantJID.User
+						} else {
+							sender = participant
+						}
 					} else if isFromMe {
 						sender = client.Store.ID.User
 					} else {

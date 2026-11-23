@@ -8,6 +8,7 @@ import json
 import audio
 
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
+WHATSAPP_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'whatsapp.db')
 WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
 
 @dataclass
@@ -47,7 +48,43 @@ class MessageContext:
     before: List[Message]
     after: List[Message]
 
+def get_whatsmeow_contact_name(sender_jid: str) -> Optional[str]:
+    """Look a sender up in whatsmeow's contact store (address-book name, then the name they set themselves).
+
+    Senders in groups often come as @lid ids, which whatsmeow_lid_map links to a phone number.
+    """
+    user = sender_jid.split('@')[0]
+    try:
+        conn = sqlite3.connect(f"file:{WHATSAPP_DB_PATH}?mode=ro", uri=True)
+        cursor = conn.cursor()
+
+        jids = [f"{user}@s.whatsapp.net", f"{user}@lid"]
+        cursor.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", (user,))
+        mapped = cursor.fetchone()
+        if mapped and mapped[0]:
+            jids.append(f"{mapped[0]}@s.whatsapp.net")
+
+        cursor.execute(f"""
+            SELECT COALESCE(NULLIF(full_name, ''), NULLIF(push_name, ''), NULLIF(first_name, ''))
+            FROM whatsmeow_contacts
+            WHERE their_jid IN ({','.join('?' * len(jids))})
+        """, jids)
+        for (name,) in cursor.fetchall():
+            if name:
+                return name
+        return None
+    except sqlite3.Error as e:
+        print(f"Database error while getting contact name: {e}")
+        return None
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
 def get_sender_name(sender_jid: str) -> str:
+    contact_name = get_whatsmeow_contact_name(sender_jid)
+    if contact_name:
+        return contact_name
+
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
@@ -329,17 +366,24 @@ def list_chats(
         cursor = conn.cursor()
         
         # Build base query
-        query_parts = ["""
-            SELECT 
-                chats.jid,
-                chats.name,
-                chats.last_message_time,
+        last_message_columns = """
                 messages.content as last_message,
                 messages.sender as last_sender,
                 messages.is_from_me as last_is_from_me
+        """ if include_last_message else """
+                NULL as last_message,
+                NULL as last_sender,
+                NULL as last_is_from_me
+        """
+        query_parts = [f"""
+            SELECT
+                chats.jid,
+                chats.name,
+                chats.last_message_time,
+                {last_message_columns}
             FROM chats
         """]
-        
+
         if include_last_message:
             query_parts.append("""
                 LEFT JOIN messages ON chats.jid = messages.chat_jid 
